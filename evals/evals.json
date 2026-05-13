@@ -1,0 +1,81 @@
+{
+  "skill_name": "clone-to-nextjs",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "pages/ 폴더에 이미 HTML 파일들이 있어: index.html, about.html, location.html, process.html. 그리고 public/css, public/js, public/images 폴더에 에셋도 다 있어. 이걸 Next.js App Router 프로젝트로 만들어줘. 각 페이지마다 route.ts 파일 만들고, next.config.ts도 설정해줘.",
+      "expected_output": "app/route.ts (index), app/about/route.ts, app/location/route.ts, app/process/route.ts 생성. next.config.ts에 cache headers 설정. 각 route.ts는 readFileSync로 pages/XXX.html 읽어서 text/html로 응답.",
+      "files": [],
+      "assertions": [
+        {
+          "name": "app/route.ts created for root page",
+          "check": "outputs/ contains app/route.ts"
+        },
+        {
+          "name": "app/about/route.ts created",
+          "check": "outputs/ contains app/about/route.ts"
+        },
+        {
+          "name": "app/location/route.ts created",
+          "check": "outputs/ contains app/location/route.ts"
+        },
+        {
+          "name": "app/process/route.ts created",
+          "check": "outputs/ contains app/process/route.ts"
+        },
+        {
+          "name": "route.ts uses readFileSync pattern",
+          "check": "app/route.ts contains 'readFileSync' and 'text/html'"
+        },
+        {
+          "name": "next.config.ts created with cache headers",
+          "check": "outputs/ contains next.config.ts with 'Cache-Control'"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I want to clone the website at https://sominclinic.com/ as a Next.js app. I want the pages: /, /about, /location, /process, /philosophy. Show me the full plan and set it up.",
+      "expected_output": "Skill should explain the clone_site.py command to run, describe the expected directory output, and generate route.ts files for each page.",
+      "files": [],
+      "assertions": [
+        {
+          "name": "clone_site.py command shown",
+          "check": "response mentions clone_site.py with the URL"
+        },
+        {
+          "name": "route structure explained",
+          "check": "response shows or generates app/about/route.ts pattern"
+        },
+        {
+          "name": "all 5 pages covered",
+          "check": "response covers /, /about, /location, /process, /philosophy"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "병원 사이트를 Next.js로 배포하고 싶어. 현재 폴더에 pages/ 폴더가 있고 안에 HTML 파일들이 있는데 clone-manifest.json 파일은 없어. setup_nextjs 스크립트를 써서 자동으로 route.ts 파일들 만들어줘.",
+      "expected_output": "setup_nextjs.py 스크립트를 실행해서 pages/*.html에서 clone-manifest.json을 자동 생성하고, 모든 HTML 파일에 대한 route.ts 파일을 생성해야 함.",
+      "files": [],
+      "assertions": [
+        {
+          "name": "clone-manifest.json auto-generated from pages/",
+          "check": "clone-manifest.json created containing all 6 html filenames"
+        },
+        {
+          "name": "route.ts files generated for all pages",
+          "check": "app/ contains route.ts files for index, about, location, process, general, philosophy"
+        },
+        {
+          "name": "next.config.ts generated",
+          "check": "next.config.ts exists and has Cache-Control"
+        },
+        {
+          "name": "setup_nextjs.py script was used",
+          "check": "setup_nextjs.py was invoked (not manual file creation)"
+        }
+      ]
+    }
+  ]
+}
