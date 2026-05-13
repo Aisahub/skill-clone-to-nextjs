@@ -35,10 +35,7 @@ export function GET() {
 | `scripts/clone_site.py` | Crawls a URL, downloads HTML + assets, rewrites internal links |
 | `scripts/setup_nextjs.py` | Reads `clone-manifest.json`, generates all `route.ts` files and `next.config.ts` |
 
-Find the scripts directory from within this skill:
-```bash
-SKILL_DIR=$(find ~/.claude/skills -name "clone-to-nextjs" -type d 2>/dev/null | head -1)
-```
+The harness sets `${CLAUDE_SKILL_DIR}` automatically — use it directly:
 
 ---
 
@@ -74,7 +71,7 @@ If the user says files are already in a folder, confirm:
 
 Then run setup:
 ```bash
-python3 "$SKILL_DIR/scripts/setup_nextjs.py" "$OUTPUT_DIR"
+python3 "${CLAUDE_SKILL_DIR}/scripts/setup_nextjs.py" "$OUTPUT_DIR"
 ```
 
 If `clone-manifest.json` doesn't exist yet (files were downloaded manually), generate it first:
@@ -102,7 +99,7 @@ python3 /dev/stdin "$OUTPUT_DIR"
 
 Then generate routes:
 ```bash
-python3 "$SKILL_DIR/scripts/setup_nextjs.py" "$OUTPUT_DIR"
+python3 "${CLAUDE_SKILL_DIR}/scripts/setup_nextjs.py" "$OUTPUT_DIR"
 ```
 
 ---
@@ -121,7 +118,7 @@ mkdir -p "$OUTPUT_DIR"
 #### Step 2 — Discover pages
 
 ```bash
-python3 "$SKILL_DIR/scripts/clone_site.py" "https://example.com" --discover
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" --discover
 ```
 
 Show the list to the user and confirm which pages to include (or all of them).
@@ -130,12 +127,12 @@ Show the list to the user and confirm which pages to include (or all of them).
 
 **All discovered pages:**
 ```bash
-python3 "$SKILL_DIR/scripts/clone_site.py" "https://example.com" --output "$OUTPUT_DIR"
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" --output "$OUTPUT_DIR"
 ```
 
 **Specific pages only:**
 ```bash
-python3 "$SKILL_DIR/scripts/clone_site.py" "https://example.com" \
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" \
   --pages / /about /location /process \
   --output "$OUTPUT_DIR"
 ```
@@ -157,7 +154,7 @@ clone-manifest.json
 #### Step 4 — Generate routes
 
 ```bash
-python3 "$SKILL_DIR/scripts/setup_nextjs.py" "$OUTPUT_DIR"
+python3 "${CLAUDE_SKILL_DIR}/scripts/setup_nextjs.py" "$OUTPUT_DIR"
 ```
 
 Produces `app/*/route.ts` for every page and `next.config.ts` with cache headers.
