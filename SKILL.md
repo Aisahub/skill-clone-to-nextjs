@@ -32,8 +32,17 @@ export function GET() {
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/clone_site.py` | Crawls a URL, downloads HTML + assets, rewrites internal links |
+| `scripts/clone_site.py` | Crawls a URL, renders each page in a real browser (Playwright), downloads all assets, rewrites links |
 | `scripts/setup_nextjs.py` | Reads `clone-manifest.json`, generates all `route.ts` files and `next.config.ts` |
+
+### clone_site.py — browser mode (default)
+
+By default the crawler launches headless Chromium via Playwright and **scrolls each page to the bottom** before saving HTML. This ensures:
+- Lazy-loaded images (`data-src`) are already swapped into `src` by the time HTML is captured
+- AJAX-driven sections (Elementor carousels, WordPress post grids) are fully rendered
+- Scroll-triggered animations have fired
+
+Pass `--no-browser` to fall back to the old fast-but-JS-blind `requests` mode (good for simple static sites).
 
 The harness sets `${CLAUDE_SKILL_DIR}` automatically — use it directly:
 
@@ -125,7 +134,7 @@ Show the list to the user and confirm which pages to include (or all of them).
 
 #### Step 3 — Clone the site
 
-**All discovered pages:**
+**All discovered pages (browser mode — recommended for WordPress/Elementor sites):**
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" --output "$OUTPUT_DIR"
 ```
@@ -135,6 +144,11 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" --outp
 python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" \
   --pages / /about /location /process \
   --output "$OUTPUT_DIR"
+```
+
+**Fast mode for simple static sites (no JS rendering):**
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_site.py" "https://example.com" --output "$OUTPUT_DIR" --no-browser
 ```
 
 The script produces inside `$OUTPUT_DIR`:

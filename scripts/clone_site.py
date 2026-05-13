@@ -4,29 +4,54 @@ clone_site.py — Mirror a static/WordPress informational site for Next.js servi
 
 Usage:
   python3 clone_site.py <url> --discover
-  python3 clone_site.py <url> [--pages /p1 /p2 ...] [--output ./]
+  python3 clone_site.py <url> [--pages /p1 /p2 ...] [--output ./] [--no-browser]
+
+By default uses a real Chromium browser (via Playwright) to fully render each page —
+scrolling to trigger lazy-loads and waiting for AJAX — before extracting HTML.
+Pass --no-browser to fall back to the fast but JS-blind requests mode.
 """
 import sys
 import os
 import re
 import json
+import time
 import argparse
 from urllib.parse import urljoin, urlparse, unquote
 from pathlib import Path
 
 
-def ensure_deps():
+def ensure_deps(browser_mode: bool):
+    missing = []
     try:
         import requests
+    except ImportError:
+        missing.append("requests")
+    try:
         from bs4 import BeautifulSoup
     except ImportError:
+        missing.append("beautifulsoup4")
+
+    if missing:
         import subprocess
-        print("Installing requests and beautifulsoup4...")
+        print(f"Installing {', '.join(missing)}...")
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4", "-q"]
+            [sys.executable, "-m", "pip", "install"] + missing + ["-q"]
         )
 
-ensure_deps()
+    if browser_mode:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            import subprocess
+            print("Installing playwright...")
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "playwright", "-q"]
+            )
+            print("Installing Chromium...")
+            subprocess.check_call(
+                [sys.executable, "-m", "playwright", "install", "chromium"]
+            )
+
 
 import requests
 from bs4 import BeautifulSoup
@@ -44,6 +69,11 @@ ASSET_EXT_MAP = {
 
 SKIP_SCHEMES = {"mailto", "tel", "javascript", "data", "#"}
 
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 def classify_asset(url: str):
     """Return (subdir, filename) for a public/ asset, or (None, None) if not an asset."""
@@ -58,28 +88,86 @@ def classify_asset(url: str):
 
 
 class SiteCloner:
-    def __init__(self, base_url: str, output_dir: str = ".", max_pages: int = 60):
+    def __init__(self, base_url: str, output_dir: str = ".", max_pages: int = 60,
+                 browser_mode: bool = True):
         self.base_url = base_url.rstrip("/")
         self.parsed_base = urlparse(self.base_url)
         self.base_domain = self.parsed_base.netloc
         self.output_dir = Path(output_dir).resolve()
         self.max_pages = max_pages
+        self.browser_mode = browser_mode
 
         self.session = requests.Session()
-        self.session.headers["User-Agent"] = (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        )
+        self.session.headers["User-Agent"] = UA
 
-        # original_url -> web_path (e.g. "/css/style.css")
         self.asset_map: dict[str, str] = {}
-        # track used filenames to avoid overwriting different assets with same basename
         self.used_filenames: dict[str, int] = {}
 
-    # ── URL utilities ──────────────────────────────────────────────────────────
+        self._playwright = None
+        self._browser = None
+        self._page = None
+
+    # ── Browser lifecycle ─────────────────────────────────────────────────────
+
+    def _start_browser(self):
+        from playwright.sync_api import sync_playwright
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=True)
+        ctx = self._browser.new_context(
+            user_agent=UA,
+            viewport={"width": 1280, "height": 900},
+        )
+        self._page = ctx.new_page()
+        print("  [browser] Chromium started")
+
+    def _stop_browser(self):
+        if self._browser:
+            self._browser.close()
+        if self._playwright:
+            self._playwright.stop()
+
+    def _render_page(self, url: str) -> str | None:
+        """Navigate, scroll to trigger all lazy-loads/AJAX, return rendered HTML."""
+        page = self._page
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30000)
+        except Exception as exc:
+            print(f"    ✗ Browser navigation failed: {exc}")
+            return None
+
+        # Smooth scroll to bottom in steps to trigger IntersectionObserver + lazy loaders
+        page.evaluate("""
+            async () => {
+                await new Promise(resolve => {
+                    const step = 400;
+                    let pos = 0;
+                    const tick = setInterval(() => {
+                        window.scrollBy(0, step);
+                        pos += step;
+                        if (pos >= document.body.scrollHeight) {
+                            clearInterval(tick);
+                            resolve();
+                        }
+                    }, 120);
+                });
+            }
+        """)
+
+        # Wait for any AJAX triggered by scroll (network settle)
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+        page.evaluate("window.scrollTo(0, 0)")
+        time.sleep(0.3)
+
+        return page.content()
+
+    # ── URL utilities ─────────────────────────────────────────────────────────
 
     def abs_url(self, href: str, page_url: str) -> str:
-        """Resolve href relative to page_url into an absolute URL."""
         href = href.strip()
         if href.startswith("//"):
             return f"{self.parsed_base.scheme}:{href}"
@@ -90,22 +178,18 @@ class SiteCloner:
         return parsed.netloc == "" or parsed.netloc == self.base_domain
 
     def url_to_route(self, url: str) -> str:
-        """URL path → clean route string (no leading/trailing slash)."""
         path = urlparse(url).path.rstrip("/")
-        # strip base path if base_url has one
         base_path = self.parsed_base.path.rstrip("/")
         if base_path and path.startswith(base_path):
             path = path[len(base_path):]
         return path.lstrip("/")
 
     def route_to_slug(self, route: str) -> str:
-        """route → safe filename stem (e.g. "about" or "services-dental")."""
         if not route:
             return "index"
         return re.sub(r"[^a-zA-Z0-9가-힣]+", "-", route).strip("-") or "index"
 
     def unique_filename(self, subdir: str, filename: str) -> str:
-        """Return a filename that doesn't collide with previously used names."""
         key = f"{subdir}/{filename}"
         stem, ext = os.path.splitext(filename)
         count = self.used_filenames.get(key, 0)
@@ -117,7 +201,6 @@ class SiteCloner:
     # ── Asset downloading ─────────────────────────────────────────────────────
 
     def fetch_asset(self, url: str) -> str | None:
-        """Download an asset, save to public/, return its web path or None."""
         if url in self.asset_map:
             return self.asset_map[url]
 
@@ -141,7 +224,7 @@ class SiteCloner:
             print(f"    ✓ {web_path}  ({size:,} bytes)")
         except Exception as exc:
             print(f"    ✗ {url}  ({exc})")
-            self.asset_map[url] = url  # leave original on failure
+            self.asset_map[url] = url
             return url
 
         self.asset_map[url] = web_path
@@ -150,7 +233,7 @@ class SiteCloner:
     # ── HTML processing ───────────────────────────────────────────────────────
 
     def rewrite_html(self, html: str, page_url: str) -> str:
-        """Download all referenced assets and rewrite their URLs; fix internal hrefs."""
+        """Download all referenced assets and rewrite URLs; fix internal hrefs."""
         soup = BeautifulSoup(html, "html.parser")
 
         # <link rel="stylesheet">
@@ -158,8 +241,7 @@ class SiteCloner:
             href = tag.get("href", "")
             if not href or href.startswith("data:"):
                 continue
-            abs = self.abs_url(href, page_url)
-            new = self.fetch_asset(abs)
+            new = self.fetch_asset(self.abs_url(href, page_url))
             if new:
                 tag["href"] = new
 
@@ -168,34 +250,41 @@ class SiteCloner:
             src = tag["src"]
             if src.startswith("data:"):
                 continue
-            abs = self.abs_url(src, page_url)
-            new = self.fetch_asset(abs)
+            new = self.fetch_asset(self.abs_url(src, page_url))
             if new:
                 tag["src"] = new
 
-        # <img src>, <source src>
+        # <img src> and <source src> — in browser mode src is already the real URL
         for tag in soup.find_all(["img", "source"], src=True):
             src = tag["src"]
             if src.startswith("data:"):
                 continue
-            abs = self.abs_url(src, page_url)
-            new = self.fetch_asset(abs)
+            new = self.fetch_asset(self.abs_url(src, page_url))
             if new:
                 tag["src"] = new
 
-        # <link rel="icon|apple-touch-icon">
+        # data-src / data-lazy-src (residual lazy attrs the JS didn't yet swap)
+        for tag in soup.find_all(True):
+            for attr in list(tag.attrs):
+                if re.match(r"data-(src|lazy-src|lazy|original)$", attr):
+                    val = tag[attr]
+                    if isinstance(val, str) and not val.startswith("data:"):
+                        new = self.fetch_asset(self.abs_url(val, page_url))
+                        if new:
+                            tag[attr] = new
+
+        # favicon / apple-touch-icon
         for tag in soup.find_all("link", href=True):
-            if tag.get("rel") and any(r in ("icon", "apple-touch-icon", "shortcut icon")
-                                      for r in tag.get("rel", [])):
+            rel = tag.get("rel", [])
+            if any(r in ("icon", "apple-touch-icon", "shortcut icon") for r in rel):
                 href = tag["href"]
                 if href.startswith("data:"):
                     continue
-                abs = self.abs_url(href, page_url)
-                new = self.fetch_asset(abs)
+                new = self.fetch_asset(self.abs_url(href, page_url))
                 if new:
                     tag["href"] = new
 
-        # Rewrite internal <a href> to local routes
+        # Internal <a href> → local routes
         for tag in soup.find_all("a", href=True):
             href = tag["href"].strip()
             if not href or any(href.startswith(s) for s in SKIP_SCHEMES):
@@ -207,35 +296,41 @@ class SiteCloner:
 
         return str(soup)
 
-    # ── Page downloading ──────────────────────────────────────────────────────
+    # ── Page fetching ─────────────────────────────────────────────────────────
 
-    def clone_page(self, url: str, slug: str) -> str | None:
-        """Download, rewrite, and save one HTML page. Returns filename or None."""
-        print(f"\n  → {url}")
+    def fetch_html(self, url: str) -> str | None:
+        """Get page HTML — via browser (rendered) or requests (raw)."""
+        if self.browser_mode:
+            return self._render_page(url)
+
         try:
             resp = self.session.get(url, timeout=20)
             resp.raise_for_status()
             if "text/html" not in resp.headers.get("Content-Type", ""):
-                print("    (not HTML, skipping)")
                 return None
+            return resp.text
         except Exception as exc:
             print(f"    ✗ Fetch failed: {exc}")
             return None
 
-        html = self.rewrite_html(resp.text, url)
+    def clone_page(self, url: str, slug: str) -> str | None:
+        print(f"\n  → {url}")
+        html = self.fetch_html(url)
+        if not html:
+            return None
+
+        html = self.rewrite_html(html, url)
 
         pages_dir = self.output_dir / "pages"
         pages_dir.mkdir(exist_ok=True)
         filename = f"{slug}.html" if slug else "index.html"
-        out = pages_dir / filename
-        out.write_text(html, encoding="utf-8")
+        (pages_dir / filename).write_text(html, encoding="utf-8")
         print(f"    Saved → pages/{filename}")
         return filename
 
-    # ── Discovery ─────────────────────────────────────────────────────────────
+    # ── Discovery (always uses requests — faster, links are in static HTML) ───
 
     def discover_pages(self, max_depth: int = 2) -> list[dict]:
-        """BFS crawl to find internal HTML pages. Returns list of {url, route}."""
         print(f"Discovering pages at {self.base_url} (max_depth={max_depth})...\n")
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(self.base_url + "/", 0)]
@@ -269,7 +364,6 @@ class SiteCloner:
                         if not href or any(href.startswith(s) for s in SKIP_SCHEMES):
                             continue
                         abs = self.abs_url(href, url)
-                        # only follow same-domain, no query strings or fragments
                         parsed = urlparse(abs)
                         if (self.is_internal(abs)
                                 and not parsed.query
@@ -284,7 +378,6 @@ class SiteCloner:
     # ── Main run ──────────────────────────────────────────────────────────────
 
     def run(self, page_routes: list[str] | None = None) -> list[dict]:
-        """Clone specified pages (or discover if None). Returns manifest pages list."""
         for d in ["pages", "public/css", "public/js", "public/images", "public/fonts"]:
             (self.output_dir / d).mkdir(parents=True, exist_ok=True)
 
@@ -297,14 +390,23 @@ class SiteCloner:
                 url = self.base_url + ("/" + route if route else "/")
                 discovered.append({"url": url, "route": route})
 
-        print(f"\nCloning {len(discovered)} page(s)...\n")
-        results = []
-        for page in discovered:
-            route = page["route"]
-            slug = self.route_to_slug(route)
-            filename = self.clone_page(page["url"], slug)
-            if filename:
-                results.append({"route": route, "slug": slug, "filename": filename})
+        print(f"\nCloning {len(discovered)} page(s)"
+              f" [{'browser' if self.browser_mode else 'requests'} mode]...\n")
+
+        if self.browser_mode:
+            self._start_browser()
+
+        try:
+            results = []
+            for page in discovered:
+                route = page["route"]
+                slug = self.route_to_slug(route)
+                filename = self.clone_page(page["url"], slug)
+                if filename:
+                    results.append({"route": route, "slug": slug, "filename": filename})
+        finally:
+            if self.browser_mode:
+                self._stop_browser()
 
         manifest = {
             "base_url": self.base_url,
@@ -331,9 +433,14 @@ def main():
     parser.add_argument("--discover", action="store_true",
                         help="Only discover pages, don't clone")
     parser.add_argument("--max-pages", type=int, default=60)
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Use plain requests instead of Playwright (faster but misses JS-rendered content)")
     args = parser.parse_args()
 
-    cloner = SiteCloner(args.url, args.output, args.max_pages)
+    browser_mode = not args.no_browser
+    ensure_deps(browser_mode)
+
+    cloner = SiteCloner(args.url, args.output, args.max_pages, browser_mode=browser_mode)
 
     if args.discover:
         pages = cloner.discover_pages()

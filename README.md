@@ -12,10 +12,11 @@ That's it. The skill is available immediately in your next Claude Code session.
 
 ## What it does
 
-- Downloads raw HTML/CSS/JS/images from any static or WordPress site
-- Rewrites all internal asset URLs to local paths
+- **Renders each page in a real Chromium browser** (Playwright) — scrolls to bottom to trigger lazy-loads and AJAX before saving HTML
+- Downloads all CSS/JS/images/fonts and rewrites URLs to local paths
 - Auto-generates `app/*/route.ts` handlers for each page
 - Sets up `next.config.ts` with security headers and asset cache rules
+- Works correctly with WordPress/Elementor, lazy-loaded images, and AJAX-driven carousels
 
 ## Usage triggers
 
@@ -32,7 +33,7 @@ Claude will automatically invoke the skill and walk you through the two-step wor
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/clone_site.py` | Crawls a URL, downloads HTML + all assets, rewrites links |
+| `scripts/clone_site.py` | Renders pages in Chromium (Playwright), downloads all assets, rewrites links. Use `--no-browser` for fast static-only mode. |
 | `scripts/setup_nextjs.py` | Reads `clone-manifest.json`, generates all `route.ts` files |
 
 ## How the output looks
